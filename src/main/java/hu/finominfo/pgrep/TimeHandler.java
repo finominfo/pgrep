@@ -16,9 +16,9 @@ public class TimeHandler {
     }
 
 
-    public String getRemainingTime(int remaining, int all) {
+    public String getRemainingTime(int remainingPieces, int allPieces) {
         long elapsedTime = System.currentTimeMillis() - start;
-        long remainingTime = elapsedTime * remaining / (all - remaining);
+        long remainingTime = elapsedTime * remainingPieces / (allPieces - remainingPieces);
 //        if ((remaining << 3) > all || remainingTime > 600_000L) {
         long averageAll = summarizedAllRunningTime.addAndGet(elapsedTime + remainingTime) / callCounter.incrementAndGet();
         remainingTime = averageAll - elapsedTime;
