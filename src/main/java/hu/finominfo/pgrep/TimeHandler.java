@@ -19,10 +19,10 @@ public class TimeHandler {
     public String getRemainingTime(int remainingPieces, int allPieces) {
         long elapsedTime = System.currentTimeMillis() - start;
         long remainingTime = elapsedTime * remainingPieces / (allPieces - remainingPieces);
-//        if ((remaining << 3) > all || remainingTime > 600_000L) {
-        long averageAll = summarizedAllRunningTime.addAndGet(elapsedTime + remainingTime) / callCounter.incrementAndGet();
-        remainingTime = averageAll - elapsedTime;
-//        }
+        if ((remainingPieces << 3) > allPieces || remainingTime > 300_000L) {
+            long averageAll = summarizedAllRunningTime.addAndGet(elapsedTime + remainingTime) / callCounter.incrementAndGet();
+            remainingTime = averageAll - elapsedTime;
+        }
         return getTime(remainingTime);
     }
 

@@ -29,7 +29,6 @@ public class PGrep {
 
     private static final String IDS_FILE = "./ids.txt";
     private static final String DIRECTORY = "./zip";
-    private final PropertyReader propertyReader;
     private final int maxThreads;
     private final long maxReadingSize;
     private final int maxFiles;
@@ -63,7 +62,7 @@ public class PGrep {
         fileNames = Files.walk(Paths.get(DIRECTORY)).filter(Files::isRegularFile).map(Object::toString).sorted().collect(Collectors.toList());
         System.out.println("Number of files: " + fileNames.size());
         allNumOfFiles = fileNames.size();
-        propertyReader = new PropertyReader();
+        PropertyReader propertyReader = new PropertyReader();
         maxThreads = propertyReader.getMaxThreads();
         maxReadingSize = propertyReader.getMaxReadingSize();
         maxFiles = propertyReader.getMaxFiles();
