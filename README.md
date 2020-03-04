@@ -17,4 +17,4 @@ java -jar pgrep-1.0-SNAPSHOT.jar
 
 **./zip**
 - In this folder the files should be copied which will be searched.
-- The zipped (or gzipped) files should end with .zip
+- The zipped (or gzipped) file names should end with .zip
