@@ -1,8 +1,8 @@
 # pgrep
 
 **This util searches parallelly from zip and/or normal text files.**
-**It is similar to the unix/linux grep command, but it has only some very basic functions**
-**It is useful when you want to search in a huge amount of files**
+**It is similar to the unix/linux grep command, but it has only some very basic functions.**
+**It is useful when you want to search in a huge amount of files.**
 
 
 **Usage:**
