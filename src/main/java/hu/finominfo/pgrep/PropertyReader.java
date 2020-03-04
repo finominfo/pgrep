@@ -17,7 +17,7 @@ public class PropertyReader {
     public PropertyReader() {
         Properties prop = new Properties();
         try {
-            prop.load(new FileInputStream("./kgrep.properties"));
+            prop.load(new FileInputStream("./pgrep.properties"));
         } catch (IOException ex) {
         }
         maxThreads = Integer.valueOf(prop.getProperty("max-threads", "4"));
