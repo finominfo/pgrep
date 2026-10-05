@@ -1,39 +1,47 @@
 package hu.finominfo.pgrep;
 
-import java.io.FileInputStream;
 import java.io.IOException;
+import java.io.Reader;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Properties;
 
-/**
- *
- * @author kalman.kovacs
- */
-public class PropertyReader {
+/** Validated settings. Missing default configuration uses documented defaults. */
+public final class PropertyReader {
+    final int maxThreads;
+    final int maxFiles;
+    final int maxLineChars;
 
-    private final int maxThreads;
-    private final long maxReadingSize;
-    private final int maxFiles;
-
-    public PropertyReader() {
-        Properties prop = new Properties();
-        try {
-            prop.load(new FileInputStream("./pgrep.properties"));
-        } catch (IOException ex) {
+    public PropertyReader(Path path, boolean required) throws IOException {
+        Properties properties = new Properties();
+        if (required || Files.exists(path)) {
+            try (Reader reader = Files.newBufferedReader(path, StandardCharsets.UTF_8)) { properties.load(reader); }
         }
-        maxThreads = Integer.valueOf(prop.getProperty("max-threads", "4"));
-        maxReadingSize = Long.valueOf(prop.getProperty("max-size", "200000000"));
-        maxFiles = Integer.valueOf(prop.getProperty("max-files", "30"));
+        for (String name : properties.stringPropertyNames()) {
+            if (!name.equals("max-threads") && !name.equals("max-files")
+                    && !name.equals("max-size") && !name.equals("max-line-chars")) {
+                throw new IllegalArgumentException("Unknown property: " + name);
+            }
+        }
+        maxThreads = (int) positive(properties, "max-threads", 4, 1024);
+        maxFiles = (int) positive(properties, "max-files", 30, 100000);
+        long budget = positive(properties, "max-size", 200000000, Long.MAX_VALUE);
+        // Conservative allowance for UTF-16 line buffers, strings and escaping.
+        long lineBudget = budget / (16L * Math.min(maxThreads, maxFiles));
+        if (lineBudget < 1) throw new IllegalArgumentException("max-size is too small for the worker count");
+        maxLineChars = (int) positive(properties, "max-line-chars", Math.min(1048576, lineBudget), Integer.MAX_VALUE - 8);
+        if (maxLineChars > lineBudget) throw new IllegalArgumentException("max-line-chars exceeds the per-worker max-size budget");
     }
 
-    public int getMaxThreads() {
-        return maxThreads;
-    }
-
-    public long getMaxReadingSize() {
-        return maxReadingSize;
-    }
-
-    public int getMaxFiles() {
-        return maxFiles;
+    private static long positive(Properties properties, String key, long fallback, long maximum) {
+        String value = properties.getProperty(key, Long.toString(fallback)).trim();
+        try {
+            long parsed = Long.parseLong(value);
+            if (parsed > 0 && parsed <= maximum) return parsed;
+        } catch (NumberFormatException ignored) {
+            // Report the property name and invalid value below.
+        }
+        throw new IllegalArgumentException(key + " must be between 1 and " + maximum + ": " + value);
     }
 }

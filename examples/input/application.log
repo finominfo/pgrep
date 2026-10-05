@@ -1,0 +1,5 @@
+ERROR payment declined
+INFO payment accepted
+WARN invoice delayed
+ERROR payment healthcheck failed
+ERROR unrelated event

@@ -1,245 +1,138 @@
 package hu.finominfo.pgrep;
 
+import java.io.BufferedWriter;
 import java.io.IOException;
-import java.nio.charset.Charset;
+import java.io.OutputStream;
+import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.Path;
 import java.nio.file.Paths;
-import static java.nio.file.StandardOpenOption.APPEND;
-import static java.nio.file.StandardOpenOption.CREATE;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.TreeMap;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
+import java.util.Iterator;
+import java.util.concurrent.CompletionService;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorCompletionService;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.logging.Level;
-import java.util.logging.Logger;
-import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
-/**
- *
- * @author kalman.kovacs@gmail.com
- */
-public class PGrep {
+/** Parallel literal search with bounded in-flight work and streamed results. */
+public final class PGrep {
+    private PGrep() { }
 
-    private static final String IDS_FILE = "./ids.txt";
-    private static final String DIRECTORY = "./zip";
-    private final int maxThreads;
-    private final long maxReadingSize;
-    private final int maxFiles;
-
-    private static final String LS = System.lineSeparator();
-
-    private final Ids ids;
-
-    private final AtomicInteger unzippingThreads = new AtomicInteger(0);
-    private final AtomicInteger greppingThreads = new AtomicInteger(0);
-    private final AtomicBoolean fileReadingInProgress = new AtomicBoolean(false);
-
-    private final List<String> fileNames;
-    private final ConcurrentLinkedQueue<byte[]> zippedFiles = new ConcurrentLinkedQueue<>();
-    private final ConcurrentLinkedQueue<Map<String, byte[]>> unzippedFiles = new ConcurrentLinkedQueue<>();
-    private final ConcurrentLinkedQueue<Map<String, Map<String, List<String>>>> result = new ConcurrentLinkedQueue<>(); //filename, id, found lines
-    private final TreeMap<String, TreeMap<String, List<String>>> orderedResult = new TreeMap<>();// id, filename, foundlines
-    private final AtomicBoolean resultOrderingAndWritting = new AtomicBoolean(false);
-
-    private final ScheduledExecutorService executor;
-
-    private volatile int emptyCycles = 0;
-    private volatile long cycleCounter = 0;
-    private final int allNumOfFiles;
-
-    private final TimeHandler timeHandler;
-
-    public PGrep() throws IOException {
-        timeHandler = new TimeHandler();
-        ids = new Ids(IDS_FILE);
-        fileNames = Files.walk(Paths.get(DIRECTORY)).filter(Files::isRegularFile).map(Object::toString).sorted().collect(Collectors.toList());
-        System.out.println("Number of files: " + fileNames.size());
-        allNumOfFiles = fileNames.size();
-        PropertyReader propertyReader = new PropertyReader();
-        maxThreads = propertyReader.getMaxThreads();
-        maxReadingSize = propertyReader.getMaxReadingSize();
-        maxFiles = propertyReader.getMaxFiles();
-        executor = new ScheduledThreadPoolExecutor(maxThreads << 1);
+    public static void main(String[] args) {
+        int code = run(args, System.out, System.err);
+        if (code != 0) System.exit(code);
     }
 
-    private void read() {
-        if (fileReadingInProgress.compareAndSet(false, true)) {
-            try {
-                long shouldRead = maxReadingSize - getSizeOfAllReadFiles();
-                long thisCycleRead = 0;
-                while (!fileNames.isEmpty() && thisCycleRead < shouldRead && zippedFiles.size() + unzippedFiles.size() < maxFiles) {
-                    try {
-                        String fileName = fileNames.remove(0);
-                        if (fileName.endsWith("zip")) {
-                            byte[] readAllBytes = Files.readAllBytes(Paths.get(fileName));
-                            zippedFiles.add(readAllBytes);
-                            thisCycleRead += readAllBytes.length;
-                        } else {
-                            Map<String, byte[]> map = new HashMap<>();
-                            byte[] readAllBytes = Files.readAllBytes(Paths.get(fileName));
-                            map.put(fileName, readAllBytes);
-                            unzippedFiles.add(map);
-                            thisCycleRead += readAllBytes.length;
+    static int run(String[] args, PrintStream out, PrintStream err) {
+        Path input = Paths.get("zip"), patterns = Paths.get("ids.txt");
+        Path output = Paths.get("result.txt"), config = Paths.get("pgrep.properties");
+        boolean explicitConfig = false;
+        try {
+            for (int i = 0; i < args.length; i++) {
+                if (args[i].equals("--help") || args[i].equals("-h")) {
+                    out.println("Usage: java -jar pgrep-2.0.0.jar [--input DIR] [--patterns FILE] [--output FILE] [--config FILE]");
+                    out.println("Defaults: ./zip, ./ids.txt, ./result.txt, optional ./pgrep.properties");
+                    out.println("UTF-8 literal search. Output is replaced only after a successful run.");
+                    return 0;
+                }
+                String option = args[i];
+                if (++i == args.length) throw new IllegalArgumentException("Missing value for " + option);
+                switch (option) {
+                    case "--input": input = Paths.get(args[i]); break;
+                    case "--patterns": patterns = Paths.get(args[i]); break;
+                    case "--output": output = Paths.get(args[i]); break;
+                    case "--config": config = Paths.get(args[i]); explicitConfig = true; break;
+                    default: throw new IllegalArgumentException("Unknown option: " + option);
+                }
+            }
+            PropertyReader settings = new PropertyReader(config, explicitConfig);
+            Ids ids = new Ids(patterns);
+            input = input.toRealPath();
+            if (!Files.isDirectory(input)) throw new IllegalArgumentException("Input must be a directory");
+            output = output.toAbsolutePath().normalize();
+            Path parent = output.getParent().toRealPath();
+            output = parent.resolve(output.getFileName());
+            if (output.startsWith(input) || Files.isSymbolicLink(output)
+                    || output.equals(patterns.toRealPath())
+                    || (Files.exists(config) && output.equals(config.toRealPath()))
+                    || (Files.exists(output) && (Files.isSameFile(output, patterns)
+                    || (Files.exists(config) && Files.isSameFile(output, config))))) {
+                throw new IllegalArgumentException("Output must be outside the input directory and must not overwrite configuration or patterns");
+            }
+            long start = System.nanoTime();
+            int searched = search(input, output, ids, settings);
+            out.printf("Searched %d files in %.3f seconds. Results: %s%n", searched,
+                    (System.nanoTime() - start) / 1_000_000_000.0, output);
+            return 0;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            err.println("Search interrupted");
+            return 1;
+        } catch (IOException | RuntimeException e) {
+            err.println("pgrep: " + e.getMessage());
+            return 1;
+        }
+    }
+
+    private static int search(Path root, Path output, Ids ids, PropertyReader settings) throws IOException, InterruptedException {
+        Path temporary = Files.createTempDirectory(output.getParent(), ".pgrep-");
+        Path combined = temporary.resolve("result.tsv");
+        ExecutorService workers = Executors.newFixedThreadPool(Math.min(settings.maxThreads, settings.maxFiles));
+        CompletionService<Path> completed = new ExecutorCompletionService<>(workers);
+        int pending = 0;
+        int searched = 0;
+        try {
+            try (Stream<Path> paths = Files.walk(root); OutputStream sink = Files.newOutputStream(combined)) {
+                sink.write("source\tline\texpression\ttext\n".getBytes(StandardCharsets.UTF_8));
+                Iterator<Path> files = paths.filter(p -> Files.isRegularFile(p, LinkOption.NOFOLLOW_LINKS)).iterator();
+                while (files.hasNext()) {
+                    if (pending == settings.maxFiles) { merge(completed, sink); pending--; }
+                    Path file = files.next();
+                    completed.submit(() -> {
+                        Path chunk = Files.createTempFile(temporary, "matches-", ".tsv");
+                        try (BufferedWriter writer = Files.newBufferedWriter(chunk, StandardCharsets.UTF_8, StandardOpenOption.WRITE)) {
+                            Util.search(file, root, ids, settings.maxLineChars, writer);
                         }
-                    } catch (IOException ex) {
-                        Logger.getLogger(PGrep.class.getName()).log(Level.SEVERE, null, ex);
-                    }
-                }
-            } finally {
-                fileReadingInProgress.set(false);
-            }
-        }
-    }
-
-    private long getSizeOfAllReadFiles() {
-        return getAllZippedSize() + getAllUnzippedSize();
-    }
-
-    private long getAllZippedSize() {
-        return zippedFiles.stream().mapToLong(bytes -> bytes.length).sum();
-    }
-
-    private long getAllUnzippedSize() {
-        return unzippedFiles.stream().map(map -> map.values().iterator().next()).mapToLong(bytes -> bytes.length).sum();
-    }
-
-    private void cycle() {
-        if (unzippingThreads.get() + greppingThreads.get() < maxThreads) {
-            if (zippedFiles.size() > unzippedFiles.size()) {
-                executor.submit(this::unzip);
-            } else if (!unzippedFiles.isEmpty()) {
-                executor.submit(this::grep);
-            }
-        }
-        if (fileNames.isEmpty() && unzippedFiles.isEmpty() && zippedFiles.isEmpty()
-                && unzippingThreads.get() == 0 && greppingThreads.get() == 0 && ((++emptyCycles) > 15)) {
-            showMetrics();
-            System.out.println("Order and write result...");
-            orderAndWriteResult();
-            executor.shutdown();
-        } else {
-            if (((++cycleCounter) & 0x7f) == 0) {
-                showMetrics();
-            }
-            executor.schedule(this::cycle, 100L, TimeUnit.MILLISECONDS);
-        }
-    }
-
-    private void unzip() {
-        unzippingThreads.incrementAndGet();
-        try {
-            byte[] bytes;
-            while (unzippedFiles.size() < 8 && (bytes = zippedFiles.poll()) != null) {
-                Util.unzipInside(bytes, unzippedFiles);
-            }
-            read();
-        } finally {
-            unzippingThreads.decrementAndGet();
-        }
-        if (unzippedFiles.size() > 0 && unzippingThreads.get() + greppingThreads.get() < maxThreads) {
-            executor.submit(this::grep);
-        } else {
-            if (zippedFiles.size() > 0 && unzippingThreads.get() + greppingThreads.get() < maxThreads) {
-                executor.submit(this::unzip);
-            } else {
-                if (unzippingThreads.get() + greppingThreads.get() < maxThreads && !fileNames.isEmpty()) {
-                    System.out.print(" WAITING...");
-                }
-            }
-        }
-    }
-
-    private void grep() {
-        greppingThreads.incrementAndGet();
-        try {
-            Map<String, byte[]> map;
-            while ((map = unzippedFiles.poll()) != null) {
-                Map.Entry<String, byte[]> first = map.entrySet().iterator().next();
-                Map<String, Map<String, List<String>>> find2 = ids.find2(first.getKey(), new String(first.getValue(), Charset.forName("UTF-8")));
-                result.add(find2);
-            }
-            if (result.size() > 500) {
-                orderAndWriteResult();
-            }
-            read();
-        } finally {
-            greppingThreads.decrementAndGet();
-        }
-        if (zippedFiles.size() > 0 && unzippingThreads.get() + greppingThreads.get() < maxThreads) {
-            executor.submit(this::unzip);
-        } else {
-            if (unzippedFiles.size() > 0 && unzippingThreads.get() + greppingThreads.get() < maxThreads) {
-                executor.submit(this::grep);
-            } else {
-                if (unzippingThreads.get() + greppingThreads.get() < maxThreads && !fileNames.isEmpty()) {
-                    System.out.print("WAITING...");
-                }
-            }
-        }
-    }
-
-    private void showMetrics() {
-        int remaining = fileNames.size() + zippedFiles.size() + unzippedFiles.size() + unzippingThreads.get() + greppingThreads.get();
-        System.out.print("files: " + fileNames.size() + " - zips: " + zippedFiles.size() + " - texts: " + unzippedFiles.size());
-        System.out.print(" - unzips: " + unzippingThreads.get() + " - greps: " + greppingThreads.get());
-        System.out.println(" - elapsed time: " + timeHandler + " - remaining time: " + timeHandler.getRemainingTime(remaining, allNumOfFiles));
-    }
-
-    private void orderAndWriteResult() {
-        if (resultOrderingAndWritting.compareAndSet(false, true)) {
-            try {
-
-                Map<String, Map<String, List<String>>> map;
-                while ((map = result.poll()) != null) {
-                    map.entrySet().stream().forEach(entry -> {
-                        String fileName = entry.getKey();
-                        Map<String, List<String>> foundLines = entry.getValue();
-                        foundLines.entrySet().forEach(idLines -> {
-                            TreeMap<String, List<String>> details = orderedResult.get(idLines.getKey());
-                            if (details == null) {
-                                details = new TreeMap<>();
-                                orderedResult.put(idLines.getKey(), details);
-                            }
-                            List<String> lines = details.get(fileName);
-                            if (lines == null) {
-                                lines = new ArrayList<>();
-                                details.put(fileName, lines);
-                            }
-                            lines.addAll(idLines.getValue());
-                        });
+                        return chunk;
                     });
+                    pending++;
+                    searched++;
                 }
-                StringBuilder sb = new StringBuilder();
-                orderedResult.entrySet().stream().forEach(e1 -> {
-                    sb.append(LS).append(LS).append("***** EXPRESSION: ").append(e1.getKey()).append(LS);
-                    e1.getValue().entrySet().stream().forEach(e2 -> {
-                        sb.append(LS).append("[filename: ").append(e2.getKey()).append("]").append(LS).append(LS);
-                        e2.getValue().forEach(line -> sb.append(line).append(LS));
-                    });
-                });
-                try {
-                    Files.write(Paths.get("./result.txt"), sb.toString().getBytes(), CREATE, APPEND);
-                } catch (IOException ex) {
-                    Logger.getLogger(PGrep.class.getName()).log(Level.SEVERE, null, ex);
-                }
-                orderedResult.clear();
+                while (pending-- > 0) merge(completed, sink);
+            }
+            try { Files.move(combined, output, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING); }
+            catch (AtomicMoveNotSupportedException e) { Files.move(combined, output, StandardCopyOption.REPLACE_EXISTING); }
+            return searched;
+        } finally {
+            workers.shutdownNow();
+            boolean interrupted = false;
+            while (!workers.isTerminated()) {
+                try { workers.awaitTermination(1, TimeUnit.SECONDS); }
+                catch (InterruptedException e) { interrupted = true; }
+            }
+            try (Stream<Path> paths = Files.list(temporary)) {
+                for (Iterator<Path> it = paths.iterator(); it.hasNext();) Files.deleteIfExists(it.next());
             } finally {
-                resultOrderingAndWritting.set(false);
+                Files.deleteIfExists(temporary);
+                if (interrupted) Thread.currentThread().interrupt();
             }
         }
     }
 
-    public static void main(String[] args) throws IOException {
-        PGrep pGrep = new PGrep();
-        pGrep.executor.submit(pGrep::read);
-        pGrep.executor.submit(pGrep::cycle);
-        System.out.println("Start working...");
+    private static void merge(CompletionService<Path> completed, OutputStream sink) throws IOException, InterruptedException {
+        try {
+            Path chunk = completed.take().get();
+            Files.copy(chunk, sink);
+            Files.delete(chunk);
+        } catch (ExecutionException e) {
+            throw new IOException("Search failed: " + e.getCause().getMessage(), e.getCause());
+        }
     }
 }

@@ -1,138 +1,64 @@
 package hu.finominfo.pgrep;
 
 import java.io.IOException;
-import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
-import java.nio.file.Paths;
+import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.HashSet;
+import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
-import java.util.stream.Collectors;
 
-/**
- *
- * @author kalman.kovacs@gmail.com
- */
-public class Ids {
+/** Immutable, case-sensitive literal search rules shared by worker threads. */
+public final class Ids {
+    private final List<String> include;
+    private final List<String> require;
+    private final List<String> exclude;
 
-    private final Set<String> ids;
-    private final Set<String> extraIds;
-    private final Set<String> minusIds;
+    public Ids(Path path) throws IOException {
+        this(Files.readAllLines(path, StandardCharsets.UTF_8));
+    }
 
-    public Ids(String fileName) throws IOException {
-        this.ids = new HashSet<>();
-        this.extraIds = new HashSet<>();
-        this.minusIds = new HashSet<>();
-        List<String> myIds = Files.lines(Paths.get(fileName), Charset.forName("UTF-8")).filter(line -> !line.isEmpty()).map(String::trim)
-                .map(ln -> ln.startsWith("\"") && ln.endsWith("\"") ? ln.substring(1, ln.length() - 1) : ln).collect(Collectors.toList());
-        myIds.forEach((id) -> {
-            if (id.startsWith("***")) {
-                extraIds.add(id.substring(3));
-            } else if (id.startsWith("---")) {
-                minusIds.add(id.substring(3));
-            } else {
-                ids.add(id);
+    public Ids(List<String> lines) {
+        Set<String> includes = new LinkedHashSet<>();
+        Set<String> required = new LinkedHashSet<>();
+        Set<String> excluded = new LinkedHashSet<>();
+        for (int i = 0; i < lines.size(); i++) {
+            String value = lines.get(i);
+            if (i == 0 && value.startsWith("\uFEFF")) value = value.substring(1);
+            value = value.trim();
+            if (value.isEmpty()) continue;
+            Set<String> target = includes;
+            if (value.startsWith("***") || value.startsWith("---")) {
+                target = value.startsWith("***") ? required : excluded;
+                value = value.substring(3).trim();
             }
-        });
-        if (ids.isEmpty()) {
-            throw new RuntimeException("There is no any text to find.");
-        }
-        if (myIds.size() != ids.size() + extraIds.size()) {
-            System.out.println("WARNING: THERE ARE REPEATS AMONG THE IDS.");
-        }
-        System.out.println("To be find:");
-        ids.forEach(System.out::println);
-        if (!extraIds.isEmpty()) {
-            System.out.println("To be find2:");
-            extraIds.forEach(System.out::println);
-        }
-        if (!minusIds.isEmpty()) {
-            System.out.println("Not to be find:");
-            minusIds.forEach(System.out::println);
-        }
-    }
-
-    public Set<String> getExtraIds() {
-        return extraIds;
-    }
-
-    public Set<String> getMinusIds() {
-        return minusIds;
-    }
-
-    public boolean containsExtraIds(String line) {
-        return extraIds.stream().anyMatch(line::contains);
-    }
-
-    public boolean containsMinusIds(String line) {
-        return minusIds.stream().anyMatch(line::contains);
-    }
-
-    public Ids(List<String> ids) {
-        this.ids = new HashSet<>();
-        this.extraIds = new HashSet<>();
-        this.minusIds = new HashSet<>();
-        this.ids.addAll(ids);
-    }
-
-    public Map<String, Map<String, List<String>>> find(String name, String text) {
-        Map<String, Map<String, List<String>>> result = new HashMap<>();
-        result.put(name, new HashMap<>());
-        for (int i = 0; i < text.length(); i++) {
-            for (String id : ids) {
-                for (int found = 0; found < id.length() && found + i < text.length(); found++) {
-                    if (id.charAt(found) != text.charAt(i + found)) {
-                        break;
-                    } else if ((found + 1) == id.length()) {
-                        copyRow(i, text, result.get(name), id);
-                        break;
-                    }
-                }
+            if (value.length() >= 2 && value.startsWith("\"") && value.endsWith("\"")) {
+                value = value.substring(1, value.length() - 1);
             }
+            if (value.isEmpty()) throw new IllegalArgumentException("Empty search expression at line " + (i + 1));
+            target.add(value);
         }
-        return result;
+        if (includes.isEmpty()) throw new IllegalArgumentException("At least one search expression is required");
+        include = immutable(includes);
+        require = immutable(required);
+        exclude = immutable(excluded);
     }
 
-    public Map<String, Map<String, List<String>>> find2(String name, String text) {
-        Map<String, Map<String, List<String>>> result = new HashMap<>();
-        Map<String, List<String>> inside = new HashMap<>();
-        result.put(name, inside);
-        ids.forEach((id) -> {
-            int i = 0;
-            while ((i = text.indexOf(id, i)) != -1) {
-                i = copyRow(i, text, inside, id);
-            }
-        });
-        return result;
+    private static List<String> immutable(Set<String> values) {
+        return Collections.unmodifiableList(new ArrayList<>(values));
     }
 
-    private int copyRow(int i, String text, Map<String, List<String>> result, String id) {
-        int rowStart = i;
-        int rowEnd = i;
-        while (rowStart > 0 && text.charAt(rowStart) != '\n') {
-            rowStart--;
+    public List<String> matches(String line) {
+        for (String pattern : exclude) if (line.contains(pattern)) return Collections.emptyList();
+        if (!require.isEmpty()) {
+            boolean accepted = false;
+            for (String pattern : require) if (line.contains(pattern)) { accepted = true; break; }
+            if (!accepted) return Collections.emptyList();
         }
-        while (rowEnd < text.length() && text.charAt(rowEnd) != '\n') {
-            rowEnd++;
-        }
-        rowStart++;
-        StringBuilder copiedLine = new StringBuilder();
-        while (rowStart < rowEnd) {
-            copiedLine.append(text.charAt(rowStart));
-            rowStart++;
-        }
-        if (!containsMinusIds(copiedLine.toString())) {
-            List<String> lines = result.get(id);
-            if (lines == null) {
-                lines = new ArrayList<>();
-                result.put(id, lines);
-            }
-            lines.add(copiedLine.toString());
-        }
-        return rowEnd;
+        List<String> matches = new ArrayList<>();
+        for (String pattern : include) if (line.contains(pattern)) matches.add(pattern);
+        return matches;
     }
-
 }

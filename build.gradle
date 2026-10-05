@@ -1,23 +1,14 @@
-plugins {
-    id 'java'
+plugins { id 'java' }
+group = 'hu.finominfo.pgrep'
+version = '2.0.0'
+repositories { mavenCentral() }
+tasks.withType(JavaCompile).configureEach {
+    options.release = 8
+    options.encoding = 'UTF-8'
 }
-
-group 'hu.finominfo.pgrep'
-version '1.0-SNAPSHOT'
-
-sourceCompatibility = 1.8
-
-repositories {
-    mavenCentral()
+dependencies { testImplementation 'junit:junit:4.13.2' }
+test {
+    useJUnit()
+    testLogging { events 'failed', 'skipped' }
 }
-
-dependencies {
-    testCompile group: 'junit', name: 'junit', version: '4.12'
-}
-
-jar {
-    manifest {
-        attributes 'Main-Class': 'hu.finominfo.pgrep.PGrep',
-        'Class-Path': configurations.runtime.files.collect { "lib/$it.name" }.join(' ')
-    }
-}
+jar { manifest { attributes 'Main-Class': 'hu.finominfo.pgrep.PGrep' } }

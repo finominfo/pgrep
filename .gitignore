@@ -1,0 +1,11 @@
+.gradle/
+build/
+out/
+.idea/
+*.iml
+*.class
+/ids.txt
+/pgrep.properties
+/zip/
+/result.txt
+.pgrep-*/

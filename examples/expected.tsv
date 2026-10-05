@@ -1,0 +1,3 @@
+source	line	expression	text
+application.log	1	ERROR	ERROR payment declined
+application.log	3	WARN	WARN invoice delayed
